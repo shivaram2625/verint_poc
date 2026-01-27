@@ -1,0 +1,96 @@
+name: Python EB POC
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  IMAGE_TAG: latest
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # === pre_build ===
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region $AWS_REGION \
+          | docker login --username AWS \
+            --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
+
+      # === build ===
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} .
+
+      # === post_build ===
+      - name: Tag and push image
+        run: |
+          TIMESTAMP=$(date '+%F_%H-%M-%S')
+          echo "IMAGE_VERSION=$TIMESTAMP" >> $GITHUB_ENV
+
+          docker tag ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} \
+            ${{ secrets.ECR_REPO_URI }}:$TIMESTAMP
+
+          docker tag ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} \
+            ${{ secrets.ECR_REPO_URI }}:${IMAGE_TAG}
+
+          docker push ${{ secrets.ECR_REPO_URI }}:$TIMESTAMP
+          docker push ${{ secrets.ECR_REPO_URI }}:${IMAGE_TAG}
+
+      - name: Create Dockerrun.aws.json
+        run: |
+          printf '{
+            "AWSEBDockerrunVersion":"1",
+            "Image":{
+              "Name":"%s",
+              "Update":"true"
+            },
+            "Ports":[
+              {
+                "ContainerPort":5005,
+                "HostPort":5005
+              }
+            ]
+          }' ${{ secrets.ECR_REPO_URI }}:${{ env.IMAGE_VERSION }} > Dockerrun.aws.json
+
+          cat Dockerrun.aws.json
+
+      - name: Zip deployment package
+        run: |
+          zip -r deployment-package.zip Dockerrun.aws.json
+
+      - name: Upload to S3
+        run: |
+          aws s3 cp deployment-package.zip \
+            s3://${{ secrets.S3_BUCKET }}/deployment-package.zip
+
+      - name: Create EB application version
+        run: |
+          aws elasticbeanstalk create-application-version \
+            --application-name ${{ secrets.EB_APP_NAME }} \
+            --version-label ${{ env.IMAGE_VERSION }} \
+            --source-bundle \
+              S3Bucket=${{ secrets.S3_BUCKET }},S3Key=deployment-package.zip
+
+      - name: Deploy to Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name ${{ secrets.EB_APP_NAME }} \
+            --environment-name ${{ secrets.EB_ENV_NAME }} \
+            --version-label ${{ env.IMAGE_VERSION }}
