@@ -20,7 +20,7 @@ jobs:
       # Elastic Beanstalk
       EB_APPLICATION_NAME: verint-python-poc-app
       EB_ENVIRONMENT_NAME: Verint-python-poc-app-env 
-      S3_BUCKET: verint-nonprod-artifacts
+      S3_BUCKET: verint-python-poc-artifacts
 
     steps:
     # -------------------------------------------------
