@@ -19,8 +19,11 @@ jobs:
 
       # Elastic Beanstalk
       EB_APPLICATION_NAME: verint-python-poc-app
-      EB_ENVIRONMENT_NAME: Verint-python-poc-app-env 
+      EB_ENVIRONMENT_NAME: Verint-python-poc-app-env
+
+      # S3 (artifact bucket)
       S3_BUCKET: verint-python-poc-artifacts
+      S3_KEY: Verint/Pipeline_Artifact
 
     steps:
     # -------------------------------------------------
@@ -102,7 +105,7 @@ jobs:
           cat Dockerrun.aws.json
 
     # -------------------------------------------------
-    # Step 8: Zip deployment package
+    # Step 8: Create deployment package
     # -------------------------------------------------
       - name: Create deployment package
         run: |
@@ -114,7 +117,7 @@ jobs:
       - name: Upload to S3
         run: |
           aws s3 cp deployment-package.zip \
-            s3://$S3_BUCKET/deployment-package.zip
+            s3://$S3_BUCKET/$S3_KEY
 
     # -------------------------------------------------
     # Step 10: Create EB application version
@@ -124,7 +127,7 @@ jobs:
           aws elasticbeanstalk create-application-version \
             --application-name $EB_APPLICATION_NAME \
             --version-label $IMAGE_VERSION \
-            --source-bundle S3Bucket=$S3_BUCKET,S3Key=deployment-package.zip \
+            --source-bundle S3Bucket=$S3_BUCKET,S3Key=$S3_KEY \
             --region $AWS_REGION
 
     # -------------------------------------------------
