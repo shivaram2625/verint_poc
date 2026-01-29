@@ -1,96 +1,139 @@
-name: Python EB POC
+name: Python code deployment to non-prod Elastic Beanstalk
 
 on:
   push:
     branches:
-      - non-prod
-
-permissions:
-  id-token: write
-  contents: read
-
-env:
-  IMAGE_TAG: latest
+      - nonprod
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
+    env:
+      AWS_REGION: us-east-1
+
+      # Docker / ECR
+      IMAGE_REPO_NAME: verint-python-poc
+      IMAGE_TAG: latest
+      ECR_REPOSITORY_URI: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/verint-python-poc
+
+      # Elastic Beanstalk
+      EB_APPLICATION_NAME: verint-python-poc-app
+      EB_ENVIRONMENT_NAME: Verint-python-poc-app-env 
+      S3_BUCKET: verint-nonprod-artifacts
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # === pre_build ===
-      - name: Login to Amazon ECR
+    # -------------------------------------------------
+    # Step 1: Check Docker installation
+    # -------------------------------------------------
+      - name: Check Docker installation and install if missing
         run: |
-          aws ecr get-login-password --region $AWS_REGION \
-          | docker login --username AWS \
-            --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.$AWS_REGION.amazonaws.com
+          if ! command -v docker &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y docker.io
+            sudo systemctl start docker
+            sudo systemctl enable docker
+          else
+            docker --version
+          fi
 
-      # === build ===
+    # -------------------------------------------------
+    # Step 2: Configure AWS credentials
+    # -------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+    # -------------------------------------------------
+    # Step 3: Checkout code
+    # -------------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+    # -------------------------------------------------
+    # Step 4: Build Docker image
+    # -------------------------------------------------
       - name: Build Docker image
         run: |
-          docker build -t ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} .
+          docker build -t $IMAGE_REPO_NAME:$IMAGE_TAG .
 
-      # === post_build ===
-      - name: Tag and push image
+    # -------------------------------------------------
+    # Step 5: Login to Amazon ECR
+    # -------------------------------------------------
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+    # -------------------------------------------------
+    # Step 6: Tag and push Docker image
+    # -------------------------------------------------
+      - name: Tag and push Docker images to ECR
         run: |
-          TIMESTAMP=$(date '+%F_%H-%M-%S')
-          echo "IMAGE_VERSION=$TIMESTAMP" >> $GITHUB_ENV
+          IMAGE_VERSION=$(date '+%F_%H-%M')
+          echo "IMAGE_VERSION=$IMAGE_VERSION" >> $GITHUB_ENV
 
-          docker tag ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} \
-            ${{ secrets.ECR_REPO_URI }}:$TIMESTAMP
+          docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $ECR_REPOSITORY_URI:$IMAGE_VERSION
+          docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $ECR_REPOSITORY_URI:$IMAGE_TAG
 
-          docker tag ${{ secrets.ECR_REPO_NAME }}:${IMAGE_TAG} \
-            ${{ secrets.ECR_REPO_URI }}:${IMAGE_TAG}
+          docker push $ECR_REPOSITORY_URI:$IMAGE_VERSION
+          docker push $ECR_REPOSITORY_URI:$IMAGE_TAG
 
-          docker push ${{ secrets.ECR_REPO_URI }}:$TIMESTAMP
-          docker push ${{ secrets.ECR_REPO_URI }}:${IMAGE_TAG}
-
+    # -------------------------------------------------
+    # Step 7: Create Dockerrun.aws.json
+    # -------------------------------------------------
       - name: Create Dockerrun.aws.json
         run: |
           printf '{
-            "AWSEBDockerrunVersion":"1",
-            "Image":{
-              "Name":"%s",
-              "Update":"true"
+            "AWSEBDockerrunVersion": "1",
+            "Image": {
+              "Name": "%s",
+              "Update": "true"
             },
-            "Ports":[
+            "Ports": [
               {
-                "ContainerPort":5005,
-                "HostPort":5005
+                "ContainerPort": 5005,
+                "HostPort": 5005
               }
             ]
-          }' ${{ secrets.ECR_REPO_URI }}:${{ env.IMAGE_VERSION }} > Dockerrun.aws.json
+          }' $ECR_REPOSITORY_URI:$IMAGE_VERSION > Dockerrun.aws.json
 
           cat Dockerrun.aws.json
 
-      - name: Zip deployment package
+    # -------------------------------------------------
+    # Step 8: Zip deployment package
+    # -------------------------------------------------
+      - name: Create deployment package
         run: |
           zip -r deployment-package.zip Dockerrun.aws.json
 
+    # -------------------------------------------------
+    # Step 9: Upload package to S3
+    # -------------------------------------------------
       - name: Upload to S3
         run: |
           aws s3 cp deployment-package.zip \
-            s3://${{ secrets.S3_BUCKET }}/deployment-package.zip
+            s3://$S3_BUCKET/deployment-package.zip
 
-      - name: Create EB application version
+    # -------------------------------------------------
+    # Step 10: Create EB application version
+    # -------------------------------------------------
+      - name: Create Elastic Beanstalk application version
         run: |
           aws elasticbeanstalk create-application-version \
-            --application-name ${{ secrets.EB_APP_NAME }} \
-            --version-label ${{ env.IMAGE_VERSION }} \
-            --source-bundle \
-              S3Bucket=${{ secrets.S3_BUCKET }},S3Key=deployment-package.zip
+            --application-name $EB_APPLICATION_NAME \
+            --version-label $IMAGE_VERSION \
+            --source-bundle S3Bucket=$S3_BUCKET,S3Key=deployment-package.zip \
+            --region $AWS_REGION
 
-      - name: Deploy to Elastic Beanstalk
+    # -------------------------------------------------
+    # Step 11: Deploy to Elastic Beanstalk
+    # -------------------------------------------------
+      - name: Deploy to Elastic Beanstalk (NON-PROD)
         run: |
           aws elasticbeanstalk update-environment \
-            --application-name ${{ secrets.EB_APP_NAME }} \
-            --environment-name ${{ secrets.EB_ENV_NAME }} \
-            --version-label ${{ env.IMAGE_VERSION }}
+            --application-name $EB_APPLICATION_NAME \
+            --environment-name $EB_ENVIRONMENT_NAME \
+            --version-label $IMAGE_VERSION \
+            --region $AWS_REGION
