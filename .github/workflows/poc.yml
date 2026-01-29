@@ -3,7 +3,7 @@ name: Python code deployment to non-prod Elastic Beanstalk
 on:
   push:
     branches:
-      - nonprod
+      - non-prod
 
 jobs:
   build-and-deploy:
